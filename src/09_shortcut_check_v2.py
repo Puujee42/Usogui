@@ -1,10 +1,11 @@
 """Day 6: re-run the shortcut check on YOUR dataset.
 
-Models (all trained on train, scored on test and on test_ood):
+Models (all trained on train, scored on test, test_ood AND test_real):
   tfidf(data)          - words in the data (the injected sentence is in here, so high is expected)
   tfidf(instruction)   - SANITY CHECK: twins share the same instruction -> should be near chance
   length only          - should be near chance because twins differ by one short sentence
 Also reported: false-positive rate on hard negatives, and recall per attack family.
+test_real is NEVER tuned on — it uses the val-tuned threshold only.
 
 Run from the repo root:  python src/09_shortcut_check_v2.py
 """
@@ -18,6 +19,12 @@ from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc
 from common import FIGURES, PROCESSED, REPORTS, SEED
 
 tr, val, te, ood = (pd.read_parquet(PROCESSED / f"{n}.parquet") for n in ("train", "val", "test", "test_ood"))
+
+# --- Load test_real (optional; warn but don't crash if absent) --------------------
+_test_real_path = PROCESSED / "test_real.parquet"
+te_real = pd.read_parquet(_test_real_path) if _test_real_path.exists() else None
+if te_real is None:
+    print("WARNING: test_real.parquet not found — skipping test_real evaluation.")
 
 
 def length_feats(s):
@@ -51,9 +58,13 @@ for t in thresholds:
 print(f"Optimal threshold (tuned on val): {best_thresh:.2f}")
 
 # --- Main results table (both fixed 0.5 and tuned threshold) -----------------
+eval_splits = [("test", te), ("test_ood", ood)]
+if te_real is not None:
+    eval_splits.append(("test_real", te_real))
+
 rows = []
 for mname, (score, _) in models.items():
-    for sname, df in (("test", te), ("test_ood", ood)):
+    for sname, df in eval_splits:
         prob = score(df)
         # Fixed 0.5 threshold
         pred_05 = (prob >= 0.5).astype(int)
@@ -65,12 +76,26 @@ for mname, (score, _) in models.items():
             pred_t = (prob >= best_thresh).astype(int)
             p_t, r_t, f1_t, _ = precision_recall_fscore_support(df["label"], pred_t,
                                                                   average="binary", zero_division=0)
+            fpr_t = ((pred_t == 1) & (df["label"].values == 0)).sum() / max((df["label"].values == 0).sum(), 1)
             rows.append((mname, sname, round(best_thresh, 2), accuracy_score(df["label"], pred_t),
                           p_t, r_t, f1_t, auc))
 res = pd.DataFrame(rows, columns=["model", "split", "threshold", "accuracy", "precision",
                                    "recall", "f1", "roc_auc"]).round(3)
 res.to_csv(REPORTS / "shortcut_check_v2.csv", index=False)
 print(res.to_string(index=False))
+
+# --- test_real summary (AUC, recall, FPR at val-tuned threshold) ---------------
+if te_real is not None:
+    print(f"\n=== test_real report (threshold={best_thresh:.2f}, tuned on val — NOT on test_real) ===")
+    prob_real = score_data(te_real)
+    pred_real = (prob_real >= best_thresh).astype(int)
+    auc_real = roc_auc_score(te_real["label"], prob_real) if te_real["label"].nunique() >= 2 else float("nan")
+    recall_real = (pred_real[te_real["label"].values == 1]).mean() if (te_real["label"] == 1).any() else float("nan")
+    n_neg = (te_real["label"] == 0).sum()
+    fpr_real = ((pred_real == 1) & (te_real["label"].values == 0)).sum() / max(n_neg, 1) if n_neg > 0 else float("nan")
+    print(f"  AUC    = {auc_real:.3f}")
+    print(f"  Recall = {recall_real:.3f}")
+    print(f"  FPR    = {fpr_real:.3f}")
 
 # --- False-positive rate on hard negatives ------------------------------------
 score = models["tfidf(data)"][0]
@@ -88,28 +113,28 @@ if len(hn):
 
 # --- Per-family recall (fixed 0.5) -------------------------------------------
 print("\nRecall per attack family (tfidf(data), threshold=0.50):")
-for sname, df in (("test", te), ("test_ood", ood)):
+for sname, df in eval_splits:
     for fam, g in df[df["label"] == 1].groupby("attack_family"):
-        print(f"   {sname:<9}{fam:<18} recall = {(score(g) >= 0.5).mean():.3f}  (n={len(g)})")
+        print(f"   {sname:<12}{fam:<18} recall = {(score(g) >= 0.5).mean():.3f}  (n={len(g)})")
 
 # --- Per-family recall (tuned threshold) --------------------------------------
 print(f"\nRecall per attack family (tfidf(data), threshold={best_thresh:.2f}):")
-for sname, df in (("test", te), ("test_ood", ood)):
+for sname, df in eval_splits:
     for fam, g in df[df["label"] == 1].groupby("attack_family"):
-        print(f"   {sname:<9}{fam:<18} recall = {(score(g) >= best_thresh).mean():.3f}  (n={len(g)})")
+        print(f"   {sname:<12}{fam:<18} recall = {(score(g) >= best_thresh).mean():.3f}  (n={len(g)})")
 
 # --- Per-source recall (tuned threshold) --------------------------------------
 print(f"\nRecall per source (tfidf(data), tuned threshold={best_thresh:.2f}):")
-for sname, df in (("test", te), ("test_ood", ood)):
+for sname, df in eval_splits:
     for src, g in df[df["label"] == 1].groupby("source"):
-        print(f"   {sname:<9}{src:<25} recall = {(score(g) >= best_thresh).mean():.3f}  (n={len(g)})")
+        print(f"   {sname:<12}{src:<25} recall = {(score(g) >= best_thresh).mean():.3f}  (n={len(g)})")
 
 # --- Top features -------------------------------------------------------------
 vec, clf = models["tfidf(data)"][1]
 names, coef = np.array(vec.get_feature_names_out()), clf.coef_[0]
 order = np.argsort(coef)
 print("\nTop words -> BENIGN:", ", ".join(names[order[:12]]))
-print("Top words -> ATTACK:", ", ".join(names[order[-12:]][::-1]))
+print("Top words -> ATTACK:", ", ".join(names[order[-12:][::-1]]))
 fig, ax = plt.subplots(figsize=(8, 5))
 idx = np.r_[order[:12], order[-12:]]
 ax.barh(names[idx], coef[idx], color=["tab:blue"] * 12 + ["tab:red"] * 12)
@@ -122,3 +147,5 @@ print("\nHOW TO READ THIS")
 print(f"- instruction-only F1 = {s.loc[('tfidf(instruction)', 'test', 0.5), 'f1']} (should be near chance; if high, instructions leak the label)")
 print(f"- length-only F1      = {s.loc[('length only', 'test', 0.5), 'f1']} (should be near chance; if high, length is a shortcut)")
 print(f"- tfidf(data) F1: test {s.loc[('tfidf(data)', 'test', 0.5), 'f1']} vs OOD {s.loc[('tfidf(data)', 'test_ood', 0.5), 'f1']} (a big drop = it memorised families)")
+if te_real is not None:
+    print(f"- tfidf(data) F1 on test_real: {s.loc[('tfidf(data)', 'test_real', 0.5), 'f1']} (held-out deepset_real docs — never tuned on)")
