@@ -1,0 +1,13 @@
+# data and models stay out of Git
+data/
+*.parquet
+*.pt
+*.safetensors
+*.bin
+# python
+.venv/
+__pycache__/
+.ipynb_checkpoints/
+# generated outputs (keep notes/ and src/)
+reports/
+figures/

@@ -1,0 +1,8 @@
+numpy
+pandas
+pyarrow
+datasets>=2.19
+scikit-learn
+matplotlib
+jupyter
+pytest
