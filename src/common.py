@@ -50,7 +50,8 @@ def is_well_formed(text: str) -> bool:
 
 # --- dataset schema ----------------------------------------------------------
 COLUMNS = ["doc_id", "variant", "instruction", "data", "label", "attack_family",
-           "hn_type", "position", "payload", "task", "source"]
+           "hn_type", "position", "payload", "task", "source",
+           "template_test_only", "hn_test_only"]
 POSITIONS = ["start", "middle", "end"]
 # Same style prefixes are used for attacks AND harmless notes, so a prefix is not a shortcut.
 STYLE_PREFIXES = ["", "", "Note: ", "Important: ", "P.S. ", "Reminder: ", "Update: "]
