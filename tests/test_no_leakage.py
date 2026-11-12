@@ -20,7 +20,7 @@ import pandas as pd
 import pytest
 
 PROCESSED = Path(__file__).resolve().parent.parent / "data" / "processed"
-SPLIT_NAMES = ["train", "val", "test", "test_ood", "test_real"]
+SPLIT_NAMES = ["train", "val", "test", "test_template", "test_real", "test_ood"]
 CORE = ["train", "val", "test"]                  # splits the model is trained / tuned / first evaluated on
 REQUIRED_COLUMNS = ["doc_id", "text", "data", "label", "attack_family"]
 FS, FE, AS, AE = "[FUNCTION_START]", "[FUNCTION_END]", "[ARGUMENT_START]", "[ARGUMENT_END]"
@@ -153,6 +153,16 @@ def test_no_real_deepset_payload_is_shared_between_splits(splits):
     assert_disjoint(keys, "deepset_real payload")
 
 
+def test_real_deepset_sentences_live_only_in_test_real_when_that_split_exists(splits):
+    """Policy 'synthetic -> real': every real deepset sentence is evaluation-only, so it can never touch tuning."""
+    if "test_real" not in splits:
+        pytest.skip("no test_real split (the group-split policy is audited by the payload test above)")
+    assert (splits["test_real"]["attack_family"] == "deepset_real").any(), "test_real contains no deepset_real attacks"
+    for name in (n for n in splits if n != "test_real"):
+        n_bad = int((splits[name]["attack_family"] == "deepset_real").sum())
+        assert n_bad == 0, f"{n_bad} deepset_real rows found in {name}; they belong only in test_real"
+
+
 def test_held_out_attack_family_never_appears_in_training_splits(splits):
     if "test_ood" not in splits:
         pytest.skip("no test_ood split")
@@ -163,30 +173,23 @@ def test_held_out_attack_family_never_appears_in_training_splits(splits):
         assert not leaked, f"held-out family {leaked} also appears in {name}"
 
 
+def test_rows_flagged_test_only_never_appear_in_train_or_val(splits):
+    """Schema used by the agent's pipeline: template_test_only / hn_test_only mark wording reserved for evaluation."""
+    flags = [c for c in ("template_test_only", "hn_test_only") if all(c in d.columns for d in splits.values())]
+    if not flags:
+        pytest.skip("no template_test_only / hn_test_only columns in this schema")
+    for c in flags:
+        for name in ("train", "val"):
+            n = int(splits[name][c].astype(bool).sum())
+            assert n == 0, f"{n} rows flagged {c} are in {name}; flagged rows must stay out of training and tuning"
+
+
 def test_held_out_templates_never_appear_in_train_val_or_test(splits):
     need(splits, "template_id", "heldout_template")
     held = {t for d in splits.values() for t in d.loc[d["heldout_template"], "template_id"] if t}
     for name in CORE:
         leaked = held & set(splits[name]["template_id"])
         assert not leaked, f"{len(leaked)} held-out templates leaked into {name}, e.g. {sorted(leaked)[:3]}"
-
-
-def test_deepset_real_not_in_train_val_test_or_test_ood(splits):
-    """All deepset_real rows must live exclusively in test_real."""
-    for name in ("train", "val", "test", "test_ood"):
-        if name not in splits:
-            continue
-        n_dr = (splits[name]["attack_family"] == "deepset_real").sum()
-        assert n_dr == 0, f"{n_dr} deepset_real rows leaked into {name}"
-
-
-def test_test_real_contains_deepset_real(splits):
-    """test_real must exist and contain deepset_real attacks."""
-    if "test_real" not in splits:
-        pytest.skip("test_real split not found")
-    tr = splits["test_real"]
-    n_dr = (tr["attack_family"] == "deepset_real").sum()
-    assert n_dr > 0, "test_real should contain deepset_real attacks"
 
 
 def test_split_sizes_look_reasonable():

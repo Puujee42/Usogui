@@ -1,15 +1,17 @@
-"""Day 6: split by document, hold out one attack family, hold out real deepset attacks into test_real,
-and check for leakage.
+"""Split by DOCUMENT into 6 sets and check for leakage (v0.4, works with both pipeline schemas).
 
-  test_real = ALL documents whose attack twin uses a real deepset injection sentence
-              (attack_family == "deepset_real"). All variants of those doc_ids (benign, attack,
-              hard negative) are kept together. The model never trains or tunes on this split.
-  test_ood  = ALL documents whose attack twin uses the held-out family (default: phishing).
-              The model never sees this family in training (out-of-distribution test).
-  rest      = split by doc_id 80/10/10 into train/val/test, so one passage (and its twins)
-              never appears in two splits.
+A doc_id and all its variants (benign / attack / hard negative) always stay together. Priority order:
+  1. test_real      docs whose attack twin is a REAL deepset sentence (evaluation-only: zero-shot synthetic -> real)
+  2. test_ood       docs whose attack twin belongs to the held-out FAMILY (default: phishing)
+  3. test_template  docs with ANY row flagged as reserved wording (held-out attack template or harmless sentence)
+  4. train/val/test the remaining docs, ~80/10/10 by number of documents
+
+Flag columns understood: heldout_template (v0.2 schema) and template_test_only / hn_test_only (agent schema).
+If NONE exists the script refuses to run, because a silent loss of the held-out-wording rule is exactly the
+bug this version fixes. Pass --allow-no-template-holdout to run without it on purpose.
 
 Run from the repo root:  python src/08_split_and_check.py [--holdout phishing]
+tests/test_no_leakage.py and tests/mutation_check.py audit the result independently.
 """
 import argparse
 import json
@@ -23,67 +25,64 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--holdout", default="phishing", help="attack family kept out of train/val/test")
 ap.add_argument("--val", type=float, default=0.1)
 ap.add_argument("--test", type=float, default=0.1)
+ap.add_argument("--allow-no-template-holdout", action="store_true")
 args = ap.parse_args()
 
 df = pd.read_parquet(INTERIM / "formatted.parquet")
 if not (df["attack_family"] == args.holdout).any():
     raise SystemExit(f"holdout family '{args.holdout}' not found. Available: {sorted(df.attack_family.unique())}")
 
-# --- 1. Extract test_real: every doc_id that has a deepset_real attack variant ----------
-deepset_real_doc_ids = set(df.loc[df["attack_family"] == "deepset_real", "doc_id"])
-real_mask = df["doc_id"].isin(deepset_real_doc_ids)
-test_real = df[real_mask].reset_index(drop=True)
-rest = df[~real_mask]
+FLAGS = [c for c in ("heldout_template", "template_test_only", "hn_test_only") if c in df.columns]
+if not FLAGS and not args.allow_no_template_holdout:
+    raise SystemExit("No flag column (heldout_template / template_test_only / hn_test_only) found, so the held-out-wording "
+                     "rule cannot be applied. Fix script 05/06 or pass --allow-no-template-holdout.")
+df["_flag"] = df[FLAGS].astype(bool).any(axis=1) if FLAGS else False
 
-# --- 2. Extract test_ood: the held-out family ----------------------------------------
-ood_docs = set(rest.loc[rest["attack_family"] == args.holdout, "doc_id"])
-ood = rest[rest["doc_id"].isin(ood_docs)].reset_index(drop=True)
-rest = rest[~rest["doc_id"].isin(ood_docs)]
+real_docs = set(df.loc[df["attack_family"] == "deepset_real", "doc_id"])
+ood_docs = set(df.loc[df["attack_family"] == args.holdout, "doc_id"]) - real_docs
+tmpl_docs = set(df.loc[df["_flag"], "doc_id"]) - real_docs - ood_docs
+rest = df[~df["doc_id"].isin(real_docs | ood_docs | tmpl_docs)]
 
-# --- 3. Split the remainder by doc_id into train / val / test -------------------------
 ids = np.array(sorted(rest["doc_id"].unique()))
 np.random.default_rng(SEED).shuffle(ids)
 n_val, n_test = int(len(ids) * args.val), int(len(ids) * args.test)
 groups = {"val": ids[:n_val], "test": ids[n_val:n_val + n_test], "train": ids[n_val + n_test:]}
-splits = {k: rest[rest["doc_id"].isin(v)].reset_index(drop=True) for k, v in groups.items()}
-splits["test_ood"] = ood
-splits["test_real"] = test_real
+splits = {k: rest[rest["doc_id"].isin(v)] for k, v in groups.items()}
+splits["test_template"] = df[df["doc_id"].isin(tmpl_docs)]
+splits["test_real"] = df[df["doc_id"].isin(real_docs)]
+splits["test_ood"] = df[df["doc_id"].isin(ood_docs)]
+splits = {k: v.drop(columns="_flag").reset_index(drop=True) for k, v in splits.items() if len(v)}
 
-# --- Sanity: train, val, test, test_ood must contain zero deepset_real rows -----------
-for name in ("train", "val", "test", "test_ood"):
-    n_dr = (splits[name]["attack_family"] == "deepset_real").sum()
-    assert n_dr == 0, f"BUG: {n_dr} deepset_real rows leaked into {name}"
-
-# ---- leakage checks ------------------------------------------------------------------
-report, problems = {"holdout_family": args.holdout, "splits": {}}, []
-names = list(splits)
+# ---- leakage checks (independent audit: tests/test_no_leakage.py) ---------------------------------
+problems, names = [], list(splits)
 for i, a in enumerate(names):
     for b in names[i + 1:]:
         for col in ("doc_id", "text", "data"):
             n = len(set(splits[a][col]) & set(splits[b][col]))
             if n:
                 problems.append(f"{n} shared '{col}' values between {a} and {b}")
-
 for name in ("train", "val", "test"):
-    if (splits[name]["attack_family"] == args.holdout).any():
+    s = splits[name]
+    if (s["attack_family"] == args.holdout).any():
         problems.append(f"held-out family '{args.holdout}' leaked into {name}")
-
+    for c in FLAGS:
+        n = int(s[c].astype(bool).sum())
+        if n:
+            problems.append(f"{n} rows flagged '{c}' are in {name}")
 for name, s in splits.items():
-    report["splits"][name] = {
-        "rows": len(s), "docs": int(s["doc_id"].nunique()),
-        "label_counts": {int(k): int(v) for k, v in s["label"].value_counts().items()},
-        "attack_families": {k: int(v) for k, v in s.loc[s.label == 1, "attack_family"].value_counts().items()},
-        "hard_negatives": {k: int(v) for k, v in s.loc[s.variant == "hard_negative", "hn_type"].value_counts().items()},
-    }
+    if name != "test_real" and (s["attack_family"] == "deepset_real").any():
+        problems.append(f"deepset_real rows found in {name}")
+
+report = {"holdout_family": args.holdout, "flag_columns": FLAGS, "splits": {}, "problems": problems}
+print(f"{'split':<14}{'rows':>6}{'docs':>6}{'benign':>8}{'attack':>8}   flagged rows")
+for name, s in splits.items():
+    lc = {int(k): int(v) for k, v in s["label"].value_counts().items()}
+    fl = {c: int(s[c].astype(bool).sum()) for c in FLAGS}
+    report["splits"][name] = {"rows": len(s), "docs": int(s["doc_id"].nunique()), "label_counts": lc, "flagged_rows": fl,
+                              "attack_families": {k: int(v) for k, v in s.loc[s.label == 1, "attack_family"].value_counts().items()}}
     s.to_parquet(PROCESSED / f"{name}.parquet", index=False)
-
-report["problems"] = problems
+    print(f"{name:<14}{len(s):>6}{s['doc_id'].nunique():>6}{lc.get(0, 0):>8}{lc.get(1, 0):>8}   {fl}")
 (REPORTS / "split_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-
-print(f"\n{'split':<12}{'rows':>7}{'docs':>7}{'benign':>8}{'attack':>8}")
-for name, r in report["splits"].items():
-    lc = r["label_counts"]
-    print(f"{name:<12}{r['rows']:>7}{r['docs']:>7}{lc.get(0, 0):>8}{lc.get(1, 0):>8}")
 print("\nLEAKAGE CHECK:", "PASSED" if not problems else "FAILED")
 for p in problems:
     print("  -", p)
