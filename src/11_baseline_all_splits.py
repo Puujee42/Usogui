@@ -1,98 +1,92 @@
-"""TF-IDF baseline on EVERY split, with a threshold policy that is not arbitrary.
-(independent of script 09)
+"""TF-IDF baseline on EVERY split, with a threshold policy that is not arbitrary.   (independent of script 09)
 
 Splits scored if present: test, test_template (unseen wording), test_real (real deepset sentences), test_ood (unseen family).
 Thresholds come from VAL only:
   0.5            : the default
-  val-F1 (mid)   : middle of the plateau of best-F1 thresholds (if val is easy, F1 is flat over a wide range).
-"""
+  val-F1 (mid)   : middle of the plateau of best-F1 thresholds (if val is easy, F1 is flat over a wide range,
+                   so the 'argmax' is arbitrary - this script prints the plateau so you can see it)
+  val-FPR<=1%    : 99th percentile of benign val scores  (the Week 20 target: false-positive rate under 1%)
 
-import os
-import pandas as pd
+Run from the repo root:  python src/11_baseline_all_splits.py
+"""
+from pathlib import Path
+
 import numpy as np
+import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import f1_score, roc_auc_score, recall_score, precision_score, confusion_matrix
+from sklearn.metrics import roc_auc_score
 
-def main():
-    splits = ['train', 'val', 'test', 'test_template', 'test_real', 'test_ood']
-    dfs = {}
-    
-    print("Loading datasets...")
-    for s in splits:
-        path = f"data/processed/{s}.parquet"
-        if os.path.exists(path):
-            dfs[s] = pd.read_parquet(path)
-            print(f"  Loaded {s:<14} ({len(dfs[s])} rows)")
-        else:
-            print(f"  Skipped {s:<13} (file not found)")
+PROCESSED = Path(__file__).resolve().parent.parent / "data" / "processed"
+SEED = 42
+tr, va = (pd.read_parquet(PROCESSED / f"{n}.parquet") for n in ("train", "val"))
+EVAL = {n: pd.read_parquet(PROCESSED / f"{n}.parquet") for n in ("test", "test_template", "test_real", "test_ood")
+        if (PROCESSED / f"{n}.parquet").exists()}
 
-    if 'train' not in dfs or 'val' not in dfs:
-        print("\nERROR: Need at least train.parquet and val.parquet to run.")
-        return
 
-    train, val = dfs['train'], dfs['val']
+def fit(col):
+    vec = TfidfVectorizer(ngram_range=(1, 2), min_df=2, sublinear_tf=True)
+    clf = LogisticRegression(max_iter=2000, random_state=SEED).fit(vec.fit_transform(tr[col]), tr["label"])
+    return (lambda d: clf.predict_proba(vec.transform(d[col]))[:, 1]), vec, clf
 
-    print("\nFitting TF-IDF + Logistic Regression on TRAIN data...")
-    vec = TfidfVectorizer(max_features=10000)
-    X_train = vec.fit_transform(train['text'])
-    y_train = train['label']
-    
-    clf = LogisticRegression(max_iter=1000)
-    clf.fit(X_train, y_train)
 
-    print("Calibrating thresholds on VAL...")
-    X_val = vec.transform(val['text'])
-    y_val = val['label']
-    val_probs = clf.predict_proba(X_val)[:, 1]
+def length_feats(s):
+    s = pd.Series(s)
+    return np.c_[np.log1p(s.str.len()), np.log1p(s.str.split().str.len())]
 
-    # Find the F1 plateau
-    thresholds = np.linspace(0.01, 0.99, 99)
-    f1s = [f1_score(y_val, val_probs >= t) for t in thresholds]
-    max_f1 = max(f1s)
-    
-    # Get all thresholds that achieve the maximum F1 score and find the midpoint
-    best_thresholds = [t for t, f in zip(thresholds, f1s) if f == max_f1]
-    mid_t = float(np.mean(best_thresholds))
 
-    print(f"  Max Val F1: {max_f1:.4f}")
-    print(f"  F1 Plateau covers thresholds: {min(best_thresholds):.2f} to {max(best_thresholds):.2f}")
-    print(f"  val-F1 (mid) threshold set to: {mid_t:.3f}\n")
+score, vec, clf = fit("data")
+s_instr = fit("instruction")[0]
+len_clf = LogisticRegression(max_iter=2000, random_state=SEED).fit(length_feats(tr["data"]), tr["label"])
+s_len = lambda d: len_clf.predict_proba(length_feats(d["data"]))[:, 1]  # noqa: E731
 
-    print(f"{'Split':<15} | {'Thresh':<7} | {'AUC':<5} | {'F1':<5} | {'Recall':<6} | {'Prec':<5} | {'FPR':<5}")
-    print("-" * 72)
 
-    def evaluate(split_name, df, t, t_name):
-        X = vec.transform(df['text'])
-        y = df['label']
-        probs = clf.predict_proba(X)[:, 1]
-        preds = (probs >= t).astype(int)
-        
-        # Protect against single-class splits
-        if len(np.unique(y)) > 1:
-            auc = roc_auc_score(y, probs)
-            tn, fp, fn, tp = confusion_matrix(y, preds).ravel()
-            fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
-        else:
-            auc = float('nan')
-            fpr = float('nan')
-            if np.unique(y)[0] == 0:
-                # All benign, FP calculation
-                fp = np.sum(preds == 1)
-                tn = np.sum(preds == 0)
-                fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
-        
-        f1 = f1_score(y, preds)
-        rec = recall_score(y, preds)
-        prec = precision_score(y, preds, zero_division=0)
-        
-        print(f"{split_name:<15} | {t_name:<7} | {auc:.3f} | {f1:.3f} | {rec:.3f} | {prec:.3f} | {fpr:.3f}")
+def f1_rec_fpr(y, s, t):
+    pred = s > t
+    tp, fp, fn = (pred & (y == 1)).sum(), (pred & (y == 0)).sum(), ((~pred) & (y == 1)).sum()
+    return 2 * tp / max(2 * tp + fp + fn, 1), pred[y == 1].mean(), pred[y == 0].mean()
 
-    for s_name in ['val', 'test', 'test_template', 'test_real', 'test_ood']:
-        if s_name in dfs:
-            evaluate(s_name, dfs[s_name], 0.5, "0.50")
-            evaluate(s_name, dfs[s_name], mid_t, f"{mid_t:.3f}")
-            print("-" * 72)
 
-if __name__ == "__main__":
-    main()
+# ---- thresholds from VAL only -----------------------------------------------------------------
+sv, yv = score(va), va["label"].to_numpy()
+grid = np.linspace(0.02, 0.98, 97)
+f1s = np.array([f1_rec_fpr(yv, sv, t)[0] for t in grid])
+plateau = grid[f1s >= f1s.max() - 1e-3]
+thr = {"0.5": 0.5, "val-F1 (mid)": float(np.median(plateau)), "val-FPR<=1%": float(np.quantile(sv[yv == 0], 0.99))}
+print(f"val best F1 = {f1s.max():.3f}; thresholds within 0.001 of it span [{plateau.min():.2f}, {plateau.max():.2f}]")
+if plateau.max() - plateau.min() > 0.3:
+    print("  WARNING: val is (nearly) saturated - any threshold in that range is 'optimal', so a val-F1 threshold is arbitrary.\n"
+          "  Use the FPR policy, and build a val set that contains unseen wording (val_template).")
+print("thresholds:", {k: round(v, 3) for k, v in thr.items()}, "\n")
+
+# ---- table ---------------------------------------------------------------------------------------
+rows = []
+for name, d in EVAL.items():
+    y, s = d["label"].to_numpy(), score(d)
+    for pn, t in thr.items():
+        f1, rec, fpr = f1_rec_fpr(y, s, t)
+        rows.append((name, len(d), round(roc_auc_score(y, s), 3), pn, round(t, 3), round(f1, 3), round(rec, 3), round(fpr, 4)))
+res = pd.DataFrame(rows, columns=["split", "n", "AUC", "policy", "thr", "F1", "recall", "FPR"])
+print(res.to_string(index=False))
+
+T = thr["val-FPR<=1%"]
+print(f"\nRECALL PER ATTACK FAMILY at the FPR<=1% threshold ({T:.3f}):")
+for name, d in EVAL.items():
+    for fam, g in d[d["label"] == 1].groupby("attack_family"):
+        print(f"   {name:<14}{fam:<17}recall = {(score(g) > T).mean():.3f}  (n={len(g)})")
+
+print("\nFALSE-POSITIVE RATE ON HARD NEGATIVES (harmless but suspicious-looking):")
+for name, d in EVAL.items():
+    hn = d[(d["label"] == 0) & (d["hn_type"] != "none")] if "hn_type" in d.columns else d.iloc[0:0]
+    for k, g in hn.groupby("hn_type"):
+        print(f"   {name:<14}{k:<19}FPR@0.5 = {(score(g) > 0.5).mean():.3f}   FPR@val-1% = {(score(g) > T).mean():.3f}  (n={len(g)})")
+
+print("\nSANITY BASELINES (AUC; ~0.5 = no shortcut):")
+for name, d in EVAL.items():
+    print(f"   {name:<14} instruction-only = {roc_auc_score(d['label'], s_instr(d)):.3f}   length-only = {roc_auc_score(d['label'], s_len(d)):.3f}")
+
+names, coef = np.array(vec.get_feature_names_out()), clf.coef_[0]
+order = np.argsort(coef)
+print("\nTop words -> BENIGN:", ", ".join(names[order[:12]]))
+print("Top words -> ATTACK:", ", ".join(names[order[-12:]][::-1]))
+print("\nREAD: test (seen wording) is expected to be ~perfect for TF-IDF; the evidence is test_template, test_real and test_ood.")

@@ -105,6 +105,28 @@ def insert_snippet(passage: str, snippet: str, position: str, rng) -> str:
     return " ".join(sents)
 
 
+# --- domain pool & URL helpers -------------------------------------------------
+FAKE_DOMAINS = [
+    "attacker.example", "evil.test", "hacker.invalid",
+    "steal-data.example", "not-suspicious.test", "legit-login.example",
+    "secure-verify.test", "account-check.invalid", "update-now.example",
+    "verify-identity.test",
+]
+
+BENIGN_URL_PATHS = [
+    "report", "overview", "docs", "data", "summary",
+    "archive", "resources", "article", "figure", "charts",
+]
+
+
+def make_benign_url(rng) -> str:
+    """Generate a harmless URL matching the domain pool and path style used by attack payloads."""
+    proto = str(rng.choice(["https", "http"]))
+    domain = str(rng.choice(FAKE_DOMAINS))
+    path = str(rng.choice(BENIGN_URL_PATHS))
+    return f"{proto}://{domain}/{path}"
+
+
 # --- loaders -------------------------------------------------------------------
 def load_squad_docs() -> pd.DataFrame:
     """One row per unique squad_v2 passage (first question kept) with a stable doc_id."""
