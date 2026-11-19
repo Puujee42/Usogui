@@ -10,6 +10,7 @@ Families (own templates) + 'deepset_real' (real prompts from deepset/prompt-inje
 Run from the repo root:  python src/05_build_attacks.py [--attack-ratio 1.0]
 """
 import argparse
+import hashlib
 
 import numpy as np
 import pandas as pd
@@ -110,22 +111,26 @@ if not pool:
     print("WARNING: no usable English deepset attacks found; continuing with own templates only")
 
 
-def make_payload(family: str) -> tuple[str, bool]:
-    """Return (payload_text, template_test_only)."""
+def make_payload(family: str) -> tuple[str, bool, str]:
+    """Return (payload_text, template_test_only, wording_id)."""
     if family == "deepset_real":
-        return str(rng.choice(pool)), False
+        stripped = str(rng.choice(pool))
+        wording_id = f"deepset:{hashlib.md5(stripped.encode('utf-8')).hexdigest()[:8]}"
+        return stripped, False, wording_id
     template = str(rng.choice(FAMILY_TEMPLATES[family]))
+    template_idx = FAMILY_TEMPLATES[family].index(template)
     test_only = template in TEST_ONLY_TEMPLATES[family]
     domain = str(rng.choice(FAKE_DOMAINS))
+    wording_id = f"atk:{family}:{template_idx}"
     return template.format(
         goal=str(rng.choice(GOALS)), persona=str(rng.choice(PERSONAS)), domain=domain,
-    ), test_only
+    ), test_only, wording_id
 
 
 rows = []
 for r in twins.itertuples():
     family = str(rng.choice(families))
-    payload, test_only = make_payload(family)
+    payload, test_only, wording_id = make_payload(family)
     payload = str(rng.choice(STYLE_PREFIXES)) + payload
     position = str(rng.choice(POSITIONS))
     rows.append({
@@ -135,6 +140,7 @@ for r in twins.itertuples():
         "payload": payload, "task": r.task, "source": "squad_v2+" + ("deepset" if family == "deepset_real" else "template"),
         "template_test_only": test_only,
         "hn_test_only": False,
+        "wording_id": wording_id,
     })
 
 out = pd.DataFrame(rows)

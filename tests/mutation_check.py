@@ -16,7 +16,7 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
 PROC, AUDIT = ROOT / "data" / "processed", ROOT / "tests" / "test_no_leakage.py"
-NAMES = ["train", "val", "test", "test_template", "test_real", "test_ood"]
+NAMES = ["train", "val", "test", "val_template", "test_template", "test_real", "test_ood"]
 PREFIX = re.compile(r"^\s*(?:note|important|p\.\s?s\.?|reminder|update)\s*[:\-\u2013\u2014]?\s*", re.I)
 
 
@@ -78,14 +78,32 @@ def flagged_row_in_train(d):
     return False
 
 
+def shared_held_out_wording_val_test_template(d):
+    if "val_template" not in d or "test_template" not in d:
+        return False
+    test_df = d["test_template"]
+    flags = [c for c in ("template_test_only", "hn_test_only") if c in test_df.columns]
+    if not flags or "wording_id" not in test_df.columns:
+        return False
+    held_rows = test_df[test_df[flags].astype(bool).any(axis=1)]
+    if held_rows.empty:
+        return False
+    r = held_rows.iloc[0].copy()
+    planted = fresh_copy(r, "mut_shared_wording")
+    add(d, "val_template", planted)
+    return True
+
+
 MUTATIONS = [
     ("real deepset sentence in TRAIN, with a changed prefix (the original bug)", real_sentence_leak("train")),
     ("real deepset sentence in VAL, with a changed prefix", real_sentence_leak("val")),
+    ("real deepset sentence in VAL_TEMPLATE, with a changed prefix", real_sentence_leak("val_template")),
     ("held-out attack family leaks into train", heldout_family_in_train),
     ("same row present in train and test", same_row_in_two_splits),
     ("broken Frege markers in val", broken_marker),
     ("label contradicts attack_family", wrong_label),
     ("row flagged test-only sits in train", flagged_row_in_train),
+    ("shared held-out wording between val_template and test_template", shared_held_out_wording_val_test_template),
 ]
 
 

@@ -50,14 +50,72 @@ groups = {"val": ids[:n_val], "test": ids[n_val:n_val + n_test], "train": ids[n_
 splits = {k: rest[rest["doc_id"].isin(v)] for k, v in groups.items()}
 
 tmpl_ids = np.array(sorted(tmpl_docs))
-np.random.default_rng(SEED).shuffle(tmpl_ids)
-n_val_tmpl = len(tmpl_ids) // 2
-splits["val_template"] = df[df["doc_id"].isin(tmpl_ids[:n_val_tmpl])]
-splits["test_template"] = df[df["doc_id"].isin(tmpl_ids[n_val_tmpl:])]
+
+# Partition held-out wordings ~50/50 per family / hn_type
+val_wordings = set()
+test_wordings = set()
+
+# Collect all held-out attack wording_ids (template_test_only == True) and partition ~50/50 per attack family
+atk_held = df[df["template_test_only"].astype(bool) & (df["attack_family"] != args.holdout)]
+for fam in sorted(atk_held["attack_family"].unique()):
+    w_ids = sorted(atk_held.loc[atk_held["attack_family"] == fam, "wording_id"].unique())
+    mid = len(w_ids) // 2
+    val_wordings.update(w_ids[:mid])
+    test_wordings.update(w_ids[mid:])
+
+# Collect all held-out hard-negative wording_ids (hn_test_only == True) and partition ~50/50 per hn_type
+hn_held = df[df["hn_test_only"].astype(bool)]
+for ht in sorted(hn_held["hn_type"].unique()):
+    w_ids = sorted(hn_held.loc[hn_held["hn_type"] == ht, "wording_id"].unique())
+    mid = len(w_ids) // 2
+    val_wordings.update(w_ids[:mid])
+    test_wordings.update(w_ids[mid:])
+
+# Route each held-out doc_id to val_template or test_template
+tmpl_df = df[df["doc_id"].isin(tmpl_docs)]
+val_indices = []
+test_indices = []
+dropped_conflicts = 0
+
+for doc_id, doc_group in tmpl_df.groupby("doc_id", sort=False):
+    atk_rows = doc_group[doc_group["template_test_only"].astype(bool)]
+    if not atk_rows.empty:
+        atk_w = atk_rows.iloc[0]["wording_id"]
+        if atk_w in val_wordings:
+            target = "val"
+        else:
+            target = "test"
+    else:
+        hn_rows = doc_group[doc_group["hn_test_only"].astype(bool)]
+        if not hn_rows.empty:
+            first_hn_w = hn_rows.iloc[0]["wording_id"]
+            if first_hn_w in val_wordings:
+                target = "val"
+            else:
+                target = "test"
+        else:
+            target = "val"
+
+    for idx, row in doc_group.iterrows():
+        is_hn_held = bool(row.get("hn_test_only", False))
+        w_id = row.get("wording_id", "")
+        if target == "val":
+            if is_hn_held and w_id in test_wordings:
+                dropped_conflicts += 1
+                continue
+            val_indices.append(idx)
+        else:
+            if is_hn_held and w_id in val_wordings:
+                dropped_conflicts += 1
+                continue
+            test_indices.append(idx)
+
+splits["val_template"] = df.loc[val_indices].copy()
+splits["test_template"] = df.loc[test_indices].copy()
 
 splits["test_real"] = df[df["doc_id"].isin(real_docs)]
 splits["test_ood"] = df[df["doc_id"].isin(ood_docs)]
-splits = {k: v.drop(columns="_flag").reset_index(drop=True) for k, v in splits.items() if len(v)}
+splits = {k: v.drop(columns="_flag", errors="ignore").reset_index(drop=True) for k, v in splits.items() if len(v)}
 
 # ---- leakage checks (independent audit: tests/test_no_leakage.py) ---------------------------------
 problems, names = [], list(splits)
@@ -79,6 +137,23 @@ for name, s in splits.items():
     if name != "test_real" and (s["attack_family"] == "deepset_real").any():
         problems.append(f"deepset_real rows found in {name}")
 
+# Check held-out wording never leaks into train/val/test
+all_held_out = val_wordings | test_wordings
+for name in ("train", "val", "test"):
+    if name in splits:
+        s = splits[name]
+        leaked_w = set(s["wording_id"]) & all_held_out
+        if leaked_w:
+            problems.append(f"{len(leaked_w)} held-out wording_id(s) leaked into {name}: {leaked_w}")
+
+# Check val_template and test_template share zero held-out wording_ids
+if "val_template" in splits and "test_template" in splits:
+    val_held = set(splits["val_template"].loc[splits["val_template"]["template_test_only"] | splits["val_template"]["hn_test_only"], "wording_id"])
+    test_held = set(splits["test_template"].loc[splits["test_template"]["template_test_only"] | splits["test_template"]["hn_test_only"], "wording_id"])
+    shared_w = val_held & test_held
+    if shared_w:
+        problems.append(f"{len(shared_w)} shared held-out wording_id(s) between val_template and test_template: {shared_w}")
+
 report = {"holdout_family": args.holdout, "flag_columns": FLAGS, "splits": {}, "problems": problems}
 print(f"{'split':<14}{'rows':>6}{'docs':>6}{'benign':>8}{'attack':>8}   flagged rows")
 for name, s in splits.items():
@@ -89,6 +164,14 @@ for name, s in splits.items():
     s.to_parquet(PROCESSED / f"{name}.parquet", index=False)
     print(f"{name:<14}{len(s):>6}{s['doc_id'].nunique():>6}{lc.get(0, 0):>8}{lc.get(1, 0):>8}   {fl}")
 (REPORTS / "split_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+if "val_template" in splits and "test_template" in splits:
+    val_held = set(splits["val_template"].loc[splits["val_template"]["template_test_only"] | splits["val_template"]["hn_test_only"], "wording_id"])
+    test_held = set(splits["test_template"].loc[splits["test_template"]["template_test_only"] | splits["test_template"]["hn_test_only"], "wording_id"])
+    print(f"\nHELD-OUT WORDING STATS:")
+    print(f"  val_template held-out wording_ids:  {len(val_held)} -> {sorted(val_held)}")
+    print(f"  test_template held-out wording_ids: {len(test_held)} -> {sorted(test_held)}")
+    print(f"  overlap: {len(val_held & test_held)}")
+    print(f"  dropped conflicting HN rows: {dropped_conflicts}")
 print("\nLEAKAGE CHECK:", "PASSED" if not problems else "FAILED")
 for p in problems:
     print("  -", p)

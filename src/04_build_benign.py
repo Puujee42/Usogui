@@ -23,7 +23,7 @@ out = pd.DataFrame({
     "doc_id": docs["doc_id"], "variant": "benign", "instruction": docs["instruction"],
     "data": docs["context"], "label": 0, "attack_family": "none", "hn_type": "none",
     "position": "none", "payload": "", "task": docs["task"], "source": "squad_v2",
-    "template_test_only": False, "hn_test_only": False,
+    "template_test_only": False, "hn_test_only": False, "wording_id": "none",
 })
 out.to_parquet(INTERIM / "benign.parquet", index=False)
 print(f"benign examples: {len(out)}")

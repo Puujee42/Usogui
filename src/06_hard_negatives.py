@@ -112,13 +112,16 @@ test_only_set = set(BENIGN_IMPERATIVES_TEST_ONLY)
 
 for r in benign.sample(frac=args.imperative_ratio, random_state=SEED + 2).itertuples():
     chosen = str(rng.choice(all_imperatives))
+    idx = all_imperatives.index(chosen)
+    wording_id = f"hn:benign_imperative:{idx}"
     snippet = str(rng.choice(STYLE_PREFIXES)) + chosen
     position = str(rng.choice(POSITIONS))
     rows.append({"doc_id": r.doc_id, "variant": "hard_negative", "instruction": r.instruction,
                  "data": insert_snippet(r.data, snippet, position, rng), "label": 0,
                  "attack_family": "none", "hn_type": "benign_imperative", "position": position,
                  "payload": snippet, "task": r.task, "source": "squad_v2+template",
-                 "template_test_only": False, "hn_test_only": chosen in test_only_set})
+                 "template_test_only": False, "hn_test_only": chosen in test_only_set,
+                 "wording_id": wording_id})
 
 # (b) natural passages containing suspicious keywords (not already used as benign docs)
 docs = load_squad_docs()
@@ -129,7 +132,8 @@ for r in docs.sample(n_kw, random_state=SEED + 3).itertuples():
     rows.append({"doc_id": r.doc_id, "variant": "hard_negative", "instruction": make_instruction(task, r.question),
                  "data": r.context, "label": 0, "attack_family": "none", "hn_type": "keyword_natural",
                  "position": "none", "payload": "", "task": task, "source": "squad_v2",
-                 "template_test_only": False, "hn_test_only": False})
+                 "template_test_only": False, "hn_test_only": False,
+                 "wording_id": f"hn:keyword_natural:{r.doc_id}"})
 
 # (c) harmless reference links and markdown image embeds
 all_link_templates = BENIGN_LINK_TEMPLATES + BENIGN_LINK_TEMPLATES_TEST_ONLY
@@ -137,6 +141,8 @@ link_test_only_set = set(BENIGN_LINK_TEMPLATES_TEST_ONLY)
 
 for r in benign.sample(frac=args.link_ratio, random_state=SEED + 4).itertuples():
     chosen = str(rng.choice(all_link_templates))
+    idx = all_link_templates.index(chosen)
+    wording_id = f"hn:benign_link:{idx}"
     url = make_benign_url(rng)
     filled = chosen.format(url=url)
     snippet = str(rng.choice(STYLE_PREFIXES)) + filled
@@ -145,7 +151,8 @@ for r in benign.sample(frac=args.link_ratio, random_state=SEED + 4).itertuples()
                  "data": insert_snippet(r.data, snippet, position, rng), "label": 0,
                  "attack_family": "none", "hn_type": "benign_link", "position": position,
                  "payload": snippet, "task": r.task, "source": "squad_v2+template",
-                 "template_test_only": False, "hn_test_only": chosen in link_test_only_set})
+                 "template_test_only": False, "hn_test_only": chosen in link_test_only_set,
+                 "wording_id": wording_id})
 
 out = pd.DataFrame(rows)
 out.to_parquet(INTERIM / "hard_negatives.parquet", index=False)

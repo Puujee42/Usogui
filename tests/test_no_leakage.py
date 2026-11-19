@@ -184,12 +184,32 @@ def test_rows_flagged_test_only_never_appear_in_train_or_val(splits):
             assert n == 0, f"{n} rows flagged {c} are in {name}; flagged rows must stay out of training and tuning"
 
 
-def test_held_out_templates_never_appear_in_train_val_or_test(splits):
-    need(splits, "template_id", "heldout_template")
-    held = {t for d in splits.values() for t in d.loc[d["heldout_template"], "template_id"] if t}
+def test_held_out_wording_never_leaks_and_val_test_template_are_disjoint(splits):
+    need(splits, "wording_id")
+    # Identify all held-out wording_ids across splits
+    held_out = set()
+    for d in splits.values():
+        flags = [c for c in ("template_test_only", "hn_test_only") if c in d.columns]
+        if flags:
+            mask = d[flags].astype(bool).any(axis=1)
+            held_out.update(w for w in d.loc[mask, "wording_id"] if w and w != "none")
+
+    # (a) train, val, and test contain zero rows with any held-out wording_id
     for name in CORE:
-        leaked = held & set(splits[name]["template_id"])
-        assert not leaked, f"{len(leaked)} held-out templates leaked into {name}, e.g. {sorted(leaked)[:3]}"
+        if name in splits:
+            leaked = held_out & set(splits[name]["wording_id"])
+            assert not leaked, f"{len(leaked)} held-out wording_ids leaked into {name}, e.g. {sorted(leaked)[:3]}"
+
+    # (b) val_template and test_template share zero held-out wording_ids
+    if "val_template" in splits and "test_template" in splits:
+        val_d = splits["val_template"]
+        test_d = splits["test_template"]
+        val_flags = [c for c in ("template_test_only", "hn_test_only") if c in val_d.columns]
+        test_flags = [c for c in ("template_test_only", "hn_test_only") if c in test_d.columns]
+        val_held = set(val_d.loc[val_d[val_flags].astype(bool).any(axis=1), "wording_id"]) if val_flags else set()
+        test_held = set(test_d.loc[test_d[test_flags].astype(bool).any(axis=1), "wording_id"]) if test_flags else set()
+        shared = val_held & test_held
+        assert not shared, f"val_template and test_template share {len(shared)} held-out wording_id(s): {sorted(shared)}"
 
 
 def test_split_sizes_look_reasonable():
