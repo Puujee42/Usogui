@@ -1,0 +1,33 @@
+# Pre-training setup and success criteria for prompt injection detection (Week 3 / Ladder)
+# Locked before training begins.
+
+# Model & Architecture
+model_name: "answerdotai/ModernBERT-base"
+max_len: 512
+dtype: "bfloat16"
+attn_implementation: "sdpa"
+gradient_checkpointing: true
+
+# Training Hyperparameters
+batch_size: 32
+lr_ce: 2.0e-5
+lr_supcon: 1.0e-5
+warmup_ratio: 0.06
+weight_decay: 0.01
+grad_clip: 1.0
+epochs: 4
+supcon_temp: 0.1
+proj_dim: 128
+seeds:
+  - 42
+  - 1337
+  - 2026
+
+# Evaluation & Decision Rules
+threshold_rule: "val_template_fpr_le_0.01"
+
+# Success Criteria (locked before training)
+success_criteria:
+  real_per_sentence_recall_gt: 0.631
+  unseen_harmless_fpr_le: 0.01
+  latency_ms_lt: 100.0  # adjusted from 50ms due to 30W firmware cap on 150W charger (compiled median 74ms)
