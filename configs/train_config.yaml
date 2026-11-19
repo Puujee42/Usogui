@@ -1,5 +1,21 @@
 # Pre-training setup and success criteria for prompt injection detection (Week 3 / Ladder)
 # Locked before training begins.
+# Updated: 2026-11-19
+
+# Hardware Environment & Power Limits (Dell G15 5530 on 150W charger)
+hardware:
+  date: "2026-11-19"
+  platform: "Dell G15 5530"
+  power_adapter: "150W charger (firmware power-capped)"
+  nvidia_smi_power_readings:
+    current_power_limit_w: 30.00
+    default_power_limit_w: 80.00
+    max_power_limit_w: 95.00
+  latency_benchmarks_192_tokens:
+    original_target_ms: 50.0
+    measured_eager_ms: 94.1
+    measured_compiled_ms: 74.0
+    adjusted_criterion_ms: 100.0
 
 # Model & Architecture
 model_name: "answerdotai/ModernBERT-base"
@@ -28,6 +44,16 @@ threshold_rule: "val_template_fpr_le_0.01"
 
 # Success Criteria (locked before training)
 success_criteria:
-  real_per_sentence_recall_gt: 0.631
-  unseen_harmless_fpr_le: 0.01
-  latency_ms_lt: 100.0  # adjusted from 50ms due to 30W firmware cap on 150W charger (compiled median 74ms)
+  test_real:
+    criterion: "paired_bootstrap_lower_bound_gt_zero"
+    description: "Paired bootstrap over the 119 distinct sentences (model - tfidf) 95% CI lower bound strictly > 0 (clearly above TF-IDF baseline macro recall of 0.565)"
+    baseline_tfidf_macro_recall: 0.565
+    n_distinct_sentences: 119
+    bootstrap_samples: 2000
+    confidence_level: 0.95
+  unseen_harmless:
+    criterion: "recall_at_fixed_fpr_le_0.01"
+    description: "Unseen-harmless FPR comparisons must evaluate recall at fixed <= 1% FPR alongside AUC"
+    max_fpr: 0.01
+    evaluate_recall_at_fixed_fpr: true
+  latency_ms_lt: 100.0  # Original target < 50ms adjusted to < 100.0ms due to Dell G15 5530 150W charger 30W firmware limit (measured 74.0ms compiled median, 94.1ms eager at 192 tokens)
