@@ -10,6 +10,7 @@ Supports:
 """
 import json
 import re
+import warnings
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
 
@@ -72,9 +73,14 @@ def select_threshold_max_fpr(y_true: Union[np.ndarray, pd.Series], probs: Union[
     # Find candidates with FPR <= max_fpr
     mask = fpr <= max_fpr
     if not np.any(mask):
-        # Fallback to threshold(s) with minimum FPR
-        min_fpr = np.min(fpr)
-        mask = fpr == min_fpr
+        warnings.warn(
+            f"No finite threshold achieves FPR <= {max_fpr:.4f} (min finite FPR is {np.min(fpr):.4f}). "
+            f"Returning threshold > 1.0 (zero positives, 0.0 FPR, 0.0 recall).",
+            UserWarning,
+            stacklevel=2,
+        )
+        dt = probs.dtype if np.issubdtype(probs.dtype, np.floating) else np.float32
+        return float(np.nextafter(dt.type(1.0), dt.type(np.inf)))
 
     candidate_indices = np.where(mask)[0]
     
@@ -130,6 +136,39 @@ def compute_real_sentence_metrics(
     return macro_recall, float(ci_low), float(ci_high), len(rates)
 
 
+def compute_paired_real_bootstrap(
+    df_real: pd.DataFrame,
+    model_probs: np.ndarray,
+    model_thresh: float,
+    baseline_probs: np.ndarray,
+    baseline_thresh: float,
+    boot: int = 2000,
+    seed: int = 42,
+) -> Tuple[float, float, float]:
+    """Compute per-sentence paired recall delta Δ(s) = recall_model(s) - recall_baseline(s)
+    and 95% bootstrap CI across the 119 distinct prefix-stripped deepset_real sentences."""
+    y = df_real["label"].to_numpy()
+    model_pred = np.asarray(model_probs) >= model_thresh
+    baseline_pred = np.asarray(baseline_probs) >= baseline_thresh
+
+    att = df_real[y == 1].copy()
+    att["model_hit"] = model_pred[y == 1]
+    att["baseline_hit"] = baseline_pred[y == 1]
+    att["sent"] = att["payload"].map(normalize_payload)
+
+    per = att.groupby("sent", sort=True).agg(
+        model_rate=("model_hit", "mean"),
+        baseline_rate=("baseline_hit", "mean"),
+    )
+    deltas = (per["model_rate"] - per["baseline_rate"]).to_numpy()
+    mean_delta = float(deltas.mean())
+
+    rng = np.random.default_rng(seed)
+    boots = [rng.choice(deltas, size=len(deltas), replace=True).mean() for _ in range(boot)]
+    ci_low, ci_high = np.percentile(boots, [2.5, 97.5])
+    return mean_delta, float(ci_low), float(ci_high)
+
+
 def evaluate_all_splits(
     model_name: str,
     fmt: str,
@@ -182,12 +221,26 @@ def evaluate_all_splits(
         else:
             hn_test_only_fpr = np.nan
             
-        # test_real per-sentence macro recall
+        # test_real per-sentence macro recall and paired bootstrap vs baseline
         real_macro = np.nan
         real_ci_low = np.nan
         real_ci_high = np.nan
+        real_delta_mean = np.nan
+        real_delta_ci_low = np.nan
+        real_delta_ci_high = np.nan
         if split_name == "test_real" and "payload" in df.columns:
             real_macro, real_ci_low, real_ci_high, _ = compute_real_sentence_metrics(df, probs, threshold)
+            tfidf_cache = REPORTS / "cache" / "step1_tfidf_test_real.npz"
+            if tfidf_cache.exists():
+                try:
+                    b_data = np.load(tfidf_cache)
+                    b_probs = b_data["probs"]
+                    b_thr = float(b_data["threshold"])
+                    real_delta_mean, real_delta_ci_low, real_delta_ci_high = compute_paired_real_bootstrap(
+                        df, probs, threshold, b_probs, b_thr
+                    )
+                except Exception:
+                    pass
             
         # Per-family recall for test_template and test_ood
         per_family_recall = {}
@@ -215,6 +268,9 @@ def evaluate_all_splits(
             "real_macro_recall": round(real_macro, 4) if not np.isnan(real_macro) else None,
             "real_ci_low": round(real_ci_low, 4) if not np.isnan(real_ci_low) else None,
             "real_ci_high": round(real_ci_high, 4) if not np.isnan(real_ci_high) else None,
+            "real_delta_mean": round(real_delta_mean, 4) if not np.isnan(real_delta_mean) else None,
+            "real_delta_ci_low": round(real_delta_ci_low, 4) if not np.isnan(real_delta_ci_low) else None,
+            "real_delta_ci_high": round(real_delta_ci_high, 4) if not np.isnan(real_delta_ci_high) else None,
             "per_family_recall": json.dumps(per_family_recall) if per_family_recall else None,
         }
         records.append(rec)

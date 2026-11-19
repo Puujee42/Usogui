@@ -31,7 +31,7 @@ from transformers import AutoModel, AutoTokenizer
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from eval_utils import format_input  # noqa: E402
+from eval_utils import format_input, select_threshold_max_fpr  # noqa: E402
 
 PROCESSED = ROOT / "data" / "processed"
 CACHE_DIR = ROOT / "reports" / "cache"
@@ -43,49 +43,7 @@ C_VALUES = [0.1, 1.0, 10.0, 100.0, 1000.0]
 POOL_TYPES = ["mean", "cls", "max"]
 
 
-def select_threshold_max_fpr(y_true: np.ndarray, probs: np.ndarray, max_fpr: float = 0.01) -> float:
-    """Select threshold on probabilities that maximizes recall while ensuring FPR <= max_fpr."""
-    y_true = np.asarray(y_true)
-    probs = np.asarray(probs)
-    fpr, tpr, thresholds = roc_curve(y_true, probs, drop_intermediate=False)
 
-    finite_mask = np.isfinite(thresholds)
-    fpr, tpr, thresholds = fpr[finite_mask], tpr[finite_mask], thresholds[finite_mask]
-
-    mask = fpr <= max_fpr
-    if not np.any(mask):
-        min_fpr = np.min(fpr)
-        mask = fpr == min_fpr
-
-    candidate_indices = np.where(mask)[0]
-    best_th = 0.5
-    best_recall = -1.0
-    best_f1 = -1.0
-    best_fpr = 2.0
-    n_neg = np.sum(y_true == 0)
-
-    for idx in candidate_indices:
-        th = float(thresholds[idx])
-        pred = probs >= th
-        tp = np.sum(pred & (y_true == 1))
-        fp = np.sum(pred & (y_true == 0))
-        fn = np.sum(~pred & (y_true == 1))
-
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-        f1 = (2 * precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
-        current_fpr = fp / n_neg if n_neg > 0 else 0.0
-
-        if (recall > best_recall) or \
-           (np.isclose(recall, best_recall) and f1 > best_f1) or \
-           (np.isclose(recall, best_recall) and np.isclose(f1, best_f1) and current_fpr < best_fpr) or \
-           (np.isclose(recall, best_recall) and np.isclose(f1, best_f1) and np.isclose(current_fpr, best_fpr) and th > best_th):
-            best_recall = recall
-            best_f1 = f1
-            best_fpr = current_fpr
-            best_th = th
-
-    return float(best_th)
 
 
 def extract_all_pools_for_texts(

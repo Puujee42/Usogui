@@ -96,6 +96,17 @@ def run_step1_tfidf(dfs: dict, fmt: str = "frege"):
     fit_time = time.time() - t0
     print(f"Fitted in {fit_time:.2f}s | Selected threshold on val_template: {thr:.4f}\n")
     
+    # Save Step 1 TF-IDF test_real baseline for paired bootstrap across all future models
+    cache_dir = ROOT / "reports" / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        cache_dir / "step1_tfidf_test_real.npz",
+        probs=probs["test_real"],
+        threshold=thr,
+        format=fmt,
+    )
+    print(f"Step 1 TF-IDF test_real baseline saved to {cache_dir / 'step1_tfidf_test_real.npz'}\n")
+    
     step1_results = evaluate_all_splits(
         model_name="Step 1 (TF-IDF + LogReg)",
         fmt=fmt,
@@ -108,10 +119,13 @@ def run_step1_tfidf(dfs: dict, fmt: str = "frege"):
     return step1_results, probs, thr
 
 
-def run_step2_frozen_modernbert(dfs: dict, fmt: str = "frege", batch_size: int = 64, max_len: int = 512, force_extract: bool = False):
+def run_step2_frozen_modernbert(dfs: dict, fmt: str = "frege", batch_size: int = 64, max_len: int = 512, force_extract: bool = False, c_values: list = None):
     print("=" * 80)
     print("STEP 2: Frozen ModernBERT-base + LogisticRegression (mean pooling, max_len=512, bf16)")
     print("=" * 80)
+    
+    if c_values is None:
+        c_values = [1.0, 0.1]
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model_id = "answerdotai/ModernBERT-base"
@@ -174,39 +188,43 @@ def run_step2_frozen_modernbert(dfs: dict, fmt: str = "frege", batch_size: int =
         torch.save(cached_embeddings, cache_path)
         print(f"Cached embeddings saved to {cache_path}.")
         
-    # Fit LogisticRegression on train
-    print("\nFitting StandardScaler and LogisticRegression(max_iter=1000, random_state=42) on train embeddings...")
-    t0 = time.time()
+    # Fit LogisticRegression on train for each C value
     X_train = cached_embeddings["train"]
     y_train = dfs["train"]["label"].to_numpy()
-    
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     
-    clf = LogisticRegression(max_iter=1000, random_state=42)
-    clf.fit(X_train_scaled, y_train)
-    print(f"Classifier fitted in {time.time() - t0:.2f}s.")
-    
-    # Predict probabilities for all splits
-    probs = {}
-    for s in ALL_SPLITS:
-        X_scaled = scaler.transform(cached_embeddings[s])
-        probs[s] = clf.predict_proba(X_scaled)[:, 1]
+    results = {}
+    for c in c_values:
+        model_name = f"Step 2 (Frozen ModernBERT, C={c})"
+        print(f"\nFitting LogisticRegression(C={c}, max_iter=2000, random_state=42) on train embeddings...")
+        t0 = time.time()
+        clf = LogisticRegression(C=c, max_iter=2000, random_state=42)
+        clf.fit(X_train_scaled, y_train)
+        print(f"Classifier (C={c}) fitted in {time.time() - t0:.2f}s.")
         
-    # Select threshold on val_template ONLY
-    thr = select_threshold_max_fpr(dfs["val_template"]["label"], probs["val_template"], max_fpr=0.01)
-    print(f"Selected threshold on val_template: {thr:.4f}\n")
-    
-    step2_results = evaluate_all_splits(
-        model_name="Step 2 (Frozen ModernBERT + LogReg)",
-        fmt=fmt,
-        split_probs=probs,
-        split_dfs=dfs,
-        threshold=thr,
-        eval_splits=EVAL_SPLITS,
-        save_to_csv=True,
-    )
-    return step2_results, probs, thr
+        # Predict probabilities for all splits
+        probs = {}
+        for s in ALL_SPLITS:
+            X_scaled = scaler.transform(cached_embeddings[s])
+            probs[s] = clf.predict_proba(X_scaled)[:, 1]
+            
+        # Select threshold on val_template ONLY
+        thr = select_threshold_max_fpr(dfs["val_template"]["label"], probs["val_template"], max_fpr=0.01)
+        print(f"Selected threshold on val_template (C={c}): {thr:.4f}\n")
+        
+        step2_res = evaluate_all_splits(
+            model_name=model_name,
+            fmt=fmt,
+            split_probs=probs,
+            split_dfs=dfs,
+            threshold=thr,
+            eval_splits=EVAL_SPLITS,
+            save_to_csv=True,
+        )
+        results[c] = (step2_res, probs, thr)
+        
+    return results
 
 
 def main():
@@ -221,53 +239,67 @@ def main():
     # Run Step 1
     s1_res, s1_probs, s1_thr = run_step1_tfidf(dfs, fmt="frege")
     
-    # Run Step 2
-    s2_res, s2_probs, s2_thr = run_step2_frozen_modernbert(
-        dfs, fmt="frege", batch_size=args.batch_size, max_len=args.max_len, force_extract=args.force_extract
+    # Run Step 2 (evaluating C=1.0 and C=0.1)
+    s2_results = run_step2_frozen_modernbert(
+        dfs, fmt="frege", batch_size=args.batch_size, max_len=args.max_len, force_extract=args.force_extract, c_values=[1.0, 0.1]
     )
     
     # Print comparison table
-    print("=" * 105)
-    print("LADDER COMPARISON: Step 1 (TF-IDF) vs Step 2 (Frozen ModernBERT-base)")
-    print(f"Rule: val_template FPR <= 0.01  |  Step 1 Thr: {s1_thr:.4f}  |  Step 2 Thr: {s2_thr:.4f}")
-    print("=" * 105)
+    print("=" * 125)
+    print("LADDER COMPARISON: Step 1 (TF-IDF) vs Step 2 (Frozen ModernBERT-base C=1.0 and C=0.1)")
+    print(f"Rule: val_template FPR <= 0.01  |  Step 1 Thr: {s1_thr:.4f}")
+    for c, (_, _, thr) in s2_results.items():
+        print(f"  Step 2 (C={c}) Thr: {thr:.4f}")
+    print("=" * 125)
     
-    cols = ["split", "n", "auc", "recall", "precision", "f1", "fpr", "hn_fpr", "hn_test_only_fpr", "real_macro_recall", "real_ci_low", "real_ci_high"]
+    cols = ["split", "n", "auc", "recall", "precision", "f1", "fpr", "hn_fpr", "hn_test_only_fpr", "real_macro_recall", "real_ci_low", "real_ci_high", "real_delta_mean", "real_delta_ci_low", "real_delta_ci_high"]
     
-    s1_disp = s1_res[cols].copy()
+    # Available columns in result
+    disp_cols = [c for c in cols if c in s1_res.columns]
+    
+    s1_disp = s1_res[disp_cols].copy()
     s1_disp.insert(1, "model", "Step 1 (TF-IDF)")
     
-    s2_disp = s2_res[cols].copy()
-    s2_disp.insert(1, "model", "Step 2 (Frozen ModernBERT)")
-    
+    s2_disps = {}
+    for c, (res, _, _) in s2_results.items():
+        d = res[[c for c in cols if c in res.columns]].copy()
+        d.insert(1, "model", f"Step 2 (C={c})")
+        s2_disps[c] = d
+        
     # Interleave rows by split
     combined = []
     for split in EVAL_SPLITS:
         r1 = s1_disp[s1_disp["split"] == split].iloc[0].to_dict()
-        r2 = s2_disp[s2_disp["split"] == split].iloc[0].to_dict()
         combined.append(r1)
-        combined.append(r2)
-        
+        for c in s2_results:
+            d = s2_disps[c]
+            r2 = d[d["split"] == split].iloc[0].to_dict()
+            combined.append(r2)
+            
     comp_df = pd.DataFrame(combined)
     print(comp_df.to_string(index=False))
-    print("=" * 105)
+    print("=" * 125)
     
     # Print detailed breakdowns for test_real, test_template, test_ood
     print("\nDETAILED BREAKDOWN:")
     for split in ["test_real", "test_template", "test_ood"]:
         r1 = s1_res[s1_res["split"] == split].iloc[0]
-        r2 = s2_res[s2_res["split"] == split].iloc[0]
         print(f"\n--- {split.upper()} ---")
         if split == "test_real":
             print(f"  Step 1 Macro Recall: {r1['real_macro_recall']:.4f}  (95% CI: [{r1['real_ci_low']:.4f}, {r1['real_ci_high']:.4f}])")
-            print(f"  Step 2 Macro Recall: {r2['real_macro_recall']:.4f}  (95% CI: [{r2['real_ci_low']:.4f}, {r2['real_ci_high']:.4f}])")
-            print(f"  Step 1 Row Recall:   {r1['recall']:.4f}  |  FPR: {r1['fpr']:.4f}  |  hn_test_only FPR: {r1['hn_test_only_fpr']}")
-            print(f"  Step 2 Row Recall:   {r2['recall']:.4f}  |  FPR: {r2['fpr']:.4f}  |  hn_test_only FPR: {r2['hn_test_only_fpr']}")
+            for c, (res, _, _) in s2_results.items():
+                r2 = res[res["split"] == split].iloc[0]
+                delta_str = f"  |  Paired Delta vs Step 1: {r2.get('real_delta_mean', 'N/A')} (95% CI: [{r2.get('real_delta_ci_low', 'N/A')}, {r2.get('real_delta_ci_high', 'N/A')}])"
+                print(f"  Step 2 (C={c}) Macro Recall: {r2['real_macro_recall']:.4f}  (95% CI: [{r2['real_ci_low']:.4f}, {r2['real_ci_high']:.4f}]){delta_str}")
         else:
             print(f"  Step 1 Per-Family Recall: {r1['per_family_recall']}")
-            print(f"  Step 2 Per-Family Recall: {r2['per_family_recall']}")
+            for c, (res, _, _) in s2_results.items():
+                r2 = res[res["split"] == split].iloc[0]
+                print(f"  Step 2 (C={c}) Per-Family Recall: {r2['per_family_recall']}")
             print(f"  Step 1 Overall Recall:    {r1['recall']:.4f}  |  FPR: {r1['fpr']:.4f}  |  hn_test_only FPR: {r1['hn_test_only_fpr']}")
-            print(f"  Step 2 Overall Recall:    {r2['recall']:.4f}  |  FPR: {r2['fpr']:.4f}  |  hn_test_only FPR: {r2['hn_test_only_fpr']}")
+            for c, (res, _, _) in s2_results.items():
+                r2 = res[res["split"] == split].iloc[0]
+                print(f"  Step 2 (C={c}) Overall Recall:    {r2['recall']:.4f}  |  FPR: {r2['fpr']:.4f}  |  hn_test_only FPR: {r2['hn_test_only_fpr']}")
 
 
 if __name__ == "__main__":
