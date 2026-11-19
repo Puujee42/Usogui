@@ -20,7 +20,7 @@ import pandas as pd
 import pytest
 
 PROCESSED = Path(__file__).resolve().parent.parent / "data" / "processed"
-SPLIT_NAMES = ["train", "val", "test", "test_template", "test_real", "test_ood"]
+SPLIT_NAMES = ["train", "val", "test", "val_template", "test_template", "test_real", "test_ood"]
 CORE = ["train", "val", "test"]                  # splits the model is trained / tuned / first evaluated on
 REQUIRED_COLUMNS = ["doc_id", "text", "data", "label", "attack_family"]
 FS, FE, AS, AE = "[FUNCTION_START]", "[FUNCTION_END]", "[ARGUMENT_START]", "[ARGUMENT_END]"

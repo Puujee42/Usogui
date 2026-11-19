@@ -1,9 +1,9 @@
-"""Split by DOCUMENT into 6 sets and check for leakage (v0.4, works with both pipeline schemas).
+"""Split by DOCUMENT into 7 sets and check for leakage (v0.4, works with both pipeline schemas).
 
 A doc_id and all its variants (benign / attack / hard negative) always stay together. Priority order:
   1. test_real      docs whose attack twin is a REAL deepset sentence (evaluation-only: zero-shot synthetic -> real)
   2. test_ood       docs whose attack twin belongs to the held-out FAMILY (default: phishing)
-  3. test_template  docs with ANY row flagged as reserved wording (held-out attack template or harmless sentence)
+  3. val_template / test_template  docs with ANY row flagged as reserved wording (held-out attack template or harmless sentence), split 50/50 by doc_id
   4. train/val/test the remaining docs, ~80/10/10 by number of documents
 
 Flag columns understood: heldout_template (v0.2 schema) and template_test_only / hn_test_only (agent schema).
@@ -48,7 +48,13 @@ np.random.default_rng(SEED).shuffle(ids)
 n_val, n_test = int(len(ids) * args.val), int(len(ids) * args.test)
 groups = {"val": ids[:n_val], "test": ids[n_val:n_val + n_test], "train": ids[n_val + n_test:]}
 splits = {k: rest[rest["doc_id"].isin(v)] for k, v in groups.items()}
-splits["test_template"] = df[df["doc_id"].isin(tmpl_docs)]
+
+tmpl_ids = np.array(sorted(tmpl_docs))
+np.random.default_rng(SEED).shuffle(tmpl_ids)
+n_val_tmpl = len(tmpl_ids) // 2
+splits["val_template"] = df[df["doc_id"].isin(tmpl_ids[:n_val_tmpl])]
+splits["test_template"] = df[df["doc_id"].isin(tmpl_ids[n_val_tmpl:])]
+
 splits["test_real"] = df[df["doc_id"].isin(real_docs)]
 splits["test_ood"] = df[df["doc_id"].isin(ood_docs)]
 splits = {k: v.drop(columns="_flag").reset_index(drop=True) for k, v in splits.items() if len(v)}
