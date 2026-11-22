@@ -14,7 +14,7 @@ Why per sentence: one real sentence is inserted into several passages, so rows a
 Run from the repo root:  python src/10_real_eval.py [--threshold 0.42] [--boot 2000]
 """
 import argparse
-import re
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -23,24 +23,16 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import precision_recall_curve, roc_auc_score
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from eval_utils import normalize_payload as norm  # noqa: E402  (shared with 12_verify_agent_claims.py)
+
 PROCESSED = Path(__file__).resolve().parent.parent / "data" / "processed"
 SEED = 42
-_PREFIX = re.compile(r"^\s*(?:note|important|p\.\s?s\.?|reminder|update)\s*[:\-\u2013\u2014]?\s*", re.IGNORECASE)
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--threshold", type=float, default=None, help="use this threshold instead of tuning on val")
 ap.add_argument("--boot", type=int, default=2000, help="bootstrap resamples over distinct sentences")
 args = ap.parse_args()
-
-
-def norm(s) -> str:
-    s = str(s)
-    while True:
-        t = _PREFIX.sub("", s, count=1)
-        if t == s:
-            break
-        s = t
-    return re.sub(r"\s+", " ", s).strip().lower().rstrip(".!?;: ")
 
 
 tr, va, real = (pd.read_parquet(PROCESSED / f"{n}.parquet") for n in ("train", "val", "test_real"))
