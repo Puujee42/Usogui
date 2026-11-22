@@ -1,0 +1,1 @@
+Read reports/ladder_results.csv and the latest reports/*.log. Report per split: threshold (from val_template), test_template recall, test_real macro recall with CI, test_ood recall, paired delta vs Step 1 with CI. State whether the success criterion (lower bound > 0) is met. List what is NOT verified. Do not change any file.

@@ -5,8 +5,12 @@ Run from the project root:
     python src/12_verify_agent_claims.py            # auto-finds the split parquet files
     python src/12_verify_agent_claims.py --dir data/processed
 
-It checks, with plain pandas (no project code, so it cannot share a bug with it):
-  1. which splits exist and how many rows/docs each has       (claim: 7 splits, 15,547 rows)
+It checks with plain pandas. Exception: distinct real sentences are counted with
+eval_utils.normalize_payload, as CLAUDE.md section 3 requires (so that one count
+shares that function with the project code). Held-out wordings = wording_id of rows
+flagged template_test_only | hn_test_only.
+  1. which splits exist and how many rows/docs each has       (claim: 7 splits, 15,437 rows after split;
+     15,547 in formatted.parquet before split, 110 dropped by 08)
   2. val_template vs test_template share 0 doc_ids            (claim)
   3. ... and 0 wording_ids                                    (claim: 12 vs 13 held-out wordings)
   4. no split pair shares a doc_id, and no identical text
@@ -17,6 +21,8 @@ Exit code 1 if any check fails.
 """
 import argparse, glob, os, sys
 import pandas as pd
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from eval_utils import normalize_payload
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--dir", default=None)
@@ -57,7 +63,7 @@ def col(df, *names):
 
 total = sum(len(v) for v in frames.values())
 check(len(frames) == 7, f"7 splits (found {len(frames)})")
-check(total == 15547, f"15,547 rows in total (found {total})")
+check(total == 15437, f"15,437 rows after split (found {total}); 15,547 before, 110 dropped by 08")
 
 # ---- val_template / test_template --------------------------------------
 vt, tt = frames.get("val_template"), frames.get("test_template")
@@ -71,7 +77,8 @@ else:
     check(not (set(vt["doc_id"]) & set(tt["doc_id"])), "val_template and test_template share 0 doc_ids")
     w = col(vt, "wording_id")
     if w and w in tt.columns:
-        a, b = set(vt[w].dropna()), set(tt[w].dropna())
+        flag = lambda df: df["template_test_only"].astype(bool) | df["hn_test_only"].astype(bool)
+        a, b = set(vt.loc[flag(vt), w].dropna()), set(tt.loc[flag(tt), w].dropna())
         print(f"held-out wording ids: val={len(a)} test={len(b)} shared={sorted(a & b)}")
         check(len(a) == 12, f"val_template has 12 wordings (found {len(a)})")
         check(len(b) == 13, f"test_template has 13 wordings (found {len(b)})")
@@ -102,7 +109,7 @@ if tr_real is not None and fam:
     real = tr_real[tr_real[fam] == "deepset_real"]
     pcol = col(real, "payload", "attack_text", "injected_text")
     if pcol:
-        n = real[pcol].str.strip().str.lower().nunique()
+        n = real[pcol].map(normalize_payload).nunique()   # per CLAUDE.md section 3
         check(n == 119, f"test_real has 119 distinct real sentences (found {n})")
         real_set = set(real[pcol].str.strip().str.lower())
         for k, v in frames.items():

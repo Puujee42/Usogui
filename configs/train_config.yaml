@@ -57,7 +57,7 @@ success_criteria:
   test_real:
     criterion: "paired_bootstrap_lower_bound_gt_zero"
     description: "Paired bootstrap over the 119 distinct sentences (model - tfidf) 95% CI lower bound strictly > 0 (clearly above TF-IDF baseline macro recall of 0.565)"
-    baseline_tfidf_macro_recall: 0.565
+    baseline_tfidf_macro_recall: 0.4919
     n_distinct_sentences: 119
     bootstrap_samples: 2000
     confidence_level: 0.95

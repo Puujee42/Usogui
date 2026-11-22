@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest:*)",
+      "Bash(python tests/mutation_check.py)",
+      "Bash(python src/12_verify_agent_claims.py)",
+      "Bash(git status)",
+      "Bash(git diff:*)"
+    ],
+    "deny": [
+      "Edit(tests/**)",
+      "Edit(data/**)",
+      "Read(.env)"
+    ]
+  }
+}
