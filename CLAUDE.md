@@ -44,7 +44,10 @@ Hard guarantees (checked by `tests/` and `src/12_verify_agent_claims.py`):
 - train/val/test contain no held-out-flagged rows or wordings
 - every `deepset_real` row lives only in `test_real`
 - "119 distinct sentences" is counted **after** `normalize_payload` (448 raw strings → 119). Always reuse that function.
-- `test_real` / `test_ood` also contain template held-out wordings: eval-only, allowed.
+- `test_real` / `test_ood` also contain template held-out wordings: eval-only, allowed. Measured 2026-11-22 (flag = `template_test_only | hn_test_only`):
+  - `test_real`: 13 flagged wordings = 7 from `test_template` + **6 from `val_template`** (`hn:benign_imperative:35–39`, `hn:benign_link:10`; 41 rows).
+  - `test_ood`: **15** flagged wordings (not 13) = 7 `test_template` + 6 `val_template` (same ids; 37 rows) + 2 own (`atk:phishing:3`, `atk:phishing:4`).
+  - All val_template-wording rows in these splits are **benign hard negatives (label 0)**: they cannot change recall, only FPR. Sensitivity check (Steps 1 and 2 C=0.1, thresholds fixed): excluding them leaves test_real macro recall, CI, paired Δ and test_ood recall identical; test_ood FPR 0.0090 → 0.0093. `src/08` was not changed.
 - Benign side of `test_real` is synthetic (SQuAD passages): its FPR is **not** a real-world FPR.
 
 Schema notes: columns include `doc_id`, `text`, `label` (0/1), `attack_family`, `hn_type`
@@ -63,9 +66,10 @@ Unflagged wording ids (`none`, `atk:*:0`, `hn:*:N`) are normal training wordings
 |---|---|---|
 | 1 | TF-IDF + LogReg | `test_template` 98.5%, `test_real` 49.2% [41.5–56.6], `test_ood` 18.1% |
 | 2 | Frozen ModernBERT + LogReg (C=0.1) | 53.9% / 30.2% [24.8–35.9] / 3.6%; paired Δ −0.190 [−0.253, −0.132] |
-| 3 | CE fine-tune (`src/22_train_ce.py`) | set up, dry-run OK (3.34 GiB); **full run pending** |
+| 3 | CE fine-tune (`src/22_train_ce.py`), frege | **seed 42 only — single seed, fragile lower bound, not a final claim.** Best epoch 4, threshold 0.000925 (val_template FPR 0.0099). `test_template` 98.9%, `test_real` 57.2% [49.4–64.8], `test_ood` 13.0% (vs TF-IDF 18.1%: worse); paired Δ vs Step 1 **+0.0805 [+0.0038, +0.1543]**. benign_imperative FPR 1.7–2.6% on unseen wordings (test_template/test_real/test_ood). Peak GPU 4,915 MiB (4.80 GiB of 5.69), set by the final-eval `torch.load` of the checkpoint onto GPU (`22_train_ce.py:525`, no `map_location`); training itself peaks ~3.3 GiB even at 32×512. ~2.6 h at the 30 W cap. Log `reports/ce_frege_seed42.log`. Seeds 1337/2026 pending. |
 | 4 | SupCon (768→128 projection, batch 32–64) | not started |
 | 5 | Format ablation: `data_only` / `plain_inst_data` / `frege` | not started |
+Step 3 compares **fine-tuning vs TF-IDF**, not Frege vs non-Frege: both use the frege format. The Frege claim needs Step 5 (and a paired comparison between CE formats, which `22_train_ce.py` does not compute; its Δ is always vs Step 1 TF-IDF frege).
 Diagnostics: C=1.0→0.1 raised val AUC 0.9570→0.9632; long SQuAD passages dilute frozen embeddings (isolated strings 1.000 vs passages 0.963/0.970). Treat as hypothesis until Step 3 confirms.
 
 ## 6. Hardware / training settings
@@ -96,8 +100,8 @@ Run the three audit commands **after any change to data/split code** and before 
 ## 9. Known open issues / to do
 - Step 3 full run results not yet reviewed → then Step 5 ablation, Step 4 SupCon, 3 seeds, UMAP, error analysis, latency measurement.
 - Real-world FPR is unmeasured (needs real benign text: emails, web pages, user prompts).
-- 30 of 119 real sentences were never detected by TF-IDF; error analysis should group them (non-English, short commands, "blame X" style).
-- Confirm the 13 template wordings inside `test_real`/`test_ood` are `test_template`'s, not `val_template`'s.
+- 36 of 119 real sentences were never detected by TF-IDF (threshold 0.3561, current data); Step 3 seed 42 never detects 30 (19 missed by both); error analysis should group them (non-English, short commands, "blame X" style).
+- ~~Confirm the 13 template wordings inside `test_real`/`test_ood` are `test_template`'s~~ Checked 2026-11-22: they are not; 6 are `val_template`'s (all benign hard negatives) and `test_ood` has 15, not 13. See §3. Documented, not fixed in `08`.
 - Remove any terminal screenshot with system info from the master deck's closing slide.
 
 ## 10. Style for reports back to the user

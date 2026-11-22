@@ -11,3 +11,6 @@ __pycache__/
 # generated outputs (keep notes/ and src/)
 reports/
 figures/
+# model checkpoints and embeddings (large, regenerable)
+checkpoints/
+reports/embeddings/
